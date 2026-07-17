@@ -88,6 +88,13 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        // Deja que nuestro degradado se dibuje detrás de la barra de estado
+        // del sistema, en vez de dejar una franja blanca separada arriba.
+        androidx.core.view.WindowCompat.setDecorFitsSystemWindows(window, false)
+        window.statusBarColor = android.graphics.Color.TRANSPARENT
+        androidx.core.view.WindowCompat.getInsetsController(window, window.decorView)
+            .isAppearanceLightStatusBars = false
+
         val dao = AppDatabase.get(this).reminderDao()
 
         suspend fun commitCreate(title: String, triggerAtMillis: Long, recurrence: String, note: String?) {
@@ -420,9 +427,6 @@ class MainActivity : ComponentActivity() {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
             putExtra(RecognizerIntent.EXTRA_LANGUAGE, "es-ES")
             putExtra(RecognizerIntent.EXTRA_PROMPT, "Dicta tu recordatorio, ej: 'el lunes reunión con Juan a las 5 pm'")
-            // Le pide al motor que use el paquete de voz sin conexión si está
-            // descargado, en vez de depender siempre del servidor de Google.
-            putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
         }
         statusFlow.value = "Escuchando..."
         launcher.launch(intent)
