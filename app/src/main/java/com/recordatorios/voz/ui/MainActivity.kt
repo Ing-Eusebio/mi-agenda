@@ -1096,6 +1096,14 @@ private fun BackupTab(
             }
         }
 
+        Spacer(modifier = Modifier.height(32.dp))
+        Text(
+            "Desarrollado por Ing. Carlos Ismael Eusebio",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.fillMaxWidth()
+        )
         Spacer(modifier = Modifier.height(24.dp))
     }
 }
