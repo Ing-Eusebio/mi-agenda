@@ -11,6 +11,7 @@ import android.media.AudioAttributes
 import androidx.core.app.NotificationCompat
 import com.recordatorios.voz.data.AppDatabase
 import com.recordatorios.voz.data.Recurrence
+import com.recordatorios.voz.data.UserPrefs
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -30,10 +31,13 @@ class AlarmReceiver : BroadcastReceiver() {
         val title = intent.getStringExtra(AlarmScheduler.EXTRA_TITLE) ?: "Recordatorio"
         val kind = intent.getStringExtra(AlarmScheduler.EXTRA_KIND) ?: AlarmScheduler.KIND_EXACT
 
+        val userName = UserPrefs.getName(context)
+        val namePrefix = if (!userName.isNullOrBlank()) "$userName, " else ""
+
         val message = if (kind == AlarmScheduler.KIND_WARNING_15MIN)
-            "$title EN 15 MINUTOS"
+            "$namePrefix$title EN 15 MINUTOS"
         else
-            title
+            "$namePrefix$title"
 
         createChannel(context)
 

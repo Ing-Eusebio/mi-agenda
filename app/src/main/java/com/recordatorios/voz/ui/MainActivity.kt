@@ -40,6 +40,7 @@ import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Repeat
 import androidx.compose.material.icons.filled.Replay
+import androidx.compose.material.icons.filled.Restore
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Share
@@ -56,23 +57,29 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import androidx.lifecycle.lifecycleScope
 import com.recordatorios.voz.alarm.AlarmScheduler
 import com.recordatorios.voz.data.AppDatabase
 import com.recordatorios.voz.data.Recurrence
 import com.recordatorios.voz.data.Reminder
+import com.recordatorios.voz.data.UserPrefs
 import com.recordatorios.voz.parser.LocalReminderParser
 import com.recordatorios.voz.parser.ParseException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import org.json.JSONArray
+import org.json.JSONObject
+import java.io.File
 import java.text.SimpleDateFormat
 import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.LocalTime
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
+import java.util.Date
 import java.util.Locale
 
 private const val CONFLICT_THRESHOLD_MILLIS = 30 * 60 * 1000L
@@ -86,6 +93,7 @@ private data class ConflictRequest(
 class MainActivity : ComponentActivity() {
 
     private val statusFlow = MutableStateFlow("Dicta o escribe tu recordatorio")
+    private val dao by lazy { AppDatabase.get(this).reminderDao() }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -96,8 +104,6 @@ class MainActivity : ComponentActivity() {
         window.statusBarColor = android.graphics.Color.TRANSPARENT
         androidx.core.view.WindowCompat.getInsetsController(window, window.decorView)
             .isAppearanceLightStatusBars = false
-
-        val dao = AppDatabase.get(this).reminderDao()
 
         suspend fun commitCreate(title: String, triggerAtMillis: Long, recurrence: String, note: String?) {
             val reminder = Reminder(
@@ -204,6 +210,7 @@ class MainActivity : ComponentActivity() {
             var searchQuery by remember { mutableStateOf("") }
             var showClearHistoryConfirm by remember { mutableStateOf(false) }
             var selectedTab by remember { mutableStateOf(0) }
+            var userName by remember { mutableStateOf(UserPrefs.getName(this@MainActivity)) }
 
             // Se recalcula cada 30s para que un recordatorio pase solo a
             // "Historial" apenas se cumple su hora, sin reiniciar la app.
@@ -226,6 +233,10 @@ class MainActivity : ComponentActivity() {
                     .filter { it.matchesSearch(searchQuery) }
                     .sortedByDescending { it.triggerAtMillis }
             }
+
+            val importLauncher = rememberLauncherForActivityResult(
+                ActivityResultContracts.OpenDocument()
+            ) { uri -> uri?.let { importBackup(it) } }
 
             val speechLauncher = rememberLauncherForActivityResult(
                 ActivityResultContracts.StartActivityForResult()
@@ -299,9 +310,9 @@ class MainActivity : ComponentActivity() {
                     onClearManualDateTime = { manualDate = null; manualTime = null },
                     searchQuery = searchQuery,
                     onSearchQueryChange = { searchQuery = it },
-                    onExport = { exportReminders(allReminders) },
+                    onExport = { exportBackup(allReminders) },
+                    onImport = { importLauncher.launch(arrayOf("application/json", "*/*")) },
                     onClearHistory = { showClearHistoryConfirm = true },
-                    onOpenOfflineVoiceSettings = { openOfflineVoiceSettings() },
                     onSubmitText = {
                         val overrideMillis = if (manualDate != null || manualTime != null) {
                             val date = manualDate ?: LocalDate.now()
@@ -402,27 +413,83 @@ class MainActivity : ComponentActivity() {
                         }
                     )
                 }
+
+                if (userName == null) {
+                    NamePromptDialog(
+                        onConfirm = { name ->
+                            UserPrefs.setName(this@MainActivity, name)
+                            userName = name
+                        }
+                    )
+                }
             }
         }
     }
 
-    private fun exportReminders(reminders: List<Reminder>) {
-        val summary = buildString {
-            appendLine("Recordatorios — MiAgenda")
-            appendLine()
-            reminders.sortedBy { it.triggerAtMillis }.forEach { reminder ->
-                append("• ${reminder.title} — ${formatDate(reminder.triggerAtMillis)}")
-                if (reminder.recurrence != Recurrence.NONE) append(" (repite: ${reminder.recurrence.lowercase()})")
-                appendLine()
-                if (!reminder.note.isNullOrBlank()) appendLine("   Nota: ${reminder.note}")
+    /**
+     * Genera un archivo de respaldo (JSON) con todos los recordatorios y abre
+     * el selector para compartirlo por correo, WhatsApp, Drive, etc.
+     */
+    private fun exportBackup(reminders: List<Reminder>) {
+        val json = JSONArray()
+        reminders.forEach { reminder ->
+            json.put(JSONObject().apply {
+                put("title", reminder.title)
+                put("triggerAtMillis", reminder.triggerAtMillis)
+                put("recurrence", reminder.recurrence)
+                put("note", reminder.note ?: JSONObject.NULL)
+            })
+        }
+
+        val backupsDir = File(cacheDir, "backups").apply { mkdirs() }
+        val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
+        val file = File(backupsDir, "miagenda_backup_$timestamp.json")
+        file.writeText(json.toString(2))
+
+        val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", file)
+        val intent = Intent(Intent.ACTION_SEND).apply {
+            type = "application/json"
+            putExtra(Intent.EXTRA_STREAM, uri)
+            putExtra(Intent.EXTRA_SUBJECT, "Backup de MiAgenda")
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        startActivity(Intent.createChooser(intent, "Compartir backup"))
+    }
+
+    /**
+     * Lee un archivo de respaldo (elegido por el usuario) y restaura los
+     * recordatorios: los inserta como nuevos y reprograma las alarmas
+     * futuras. No borra lo que ya tenías, solo agrega lo del backup.
+     */
+    private fun importBackup(uri: Uri) {
+        lifecycleScope.launch {
+            try {
+                val text = contentResolver.openInputStream(uri)
+                    ?.bufferedReader()
+                    ?.use { it.readText() }
+                    ?: throw IllegalStateException("No se pudo leer el archivo")
+
+                val array = JSONArray(text)
+                var count = 0
+                for (i in 0 until array.length()) {
+                    val obj = array.getJSONObject(i)
+                    val reminder = Reminder(
+                        title = obj.getString("title"),
+                        triggerAtMillis = obj.getLong("triggerAtMillis"),
+                        recurrence = obj.optString("recurrence", Recurrence.NONE),
+                        note = if (obj.isNull("note")) null else obj.optString("note")
+                    )
+                    val id = dao.insert(reminder)
+                    if (reminder.recurrence != Recurrence.NONE || reminder.triggerAtMillis > System.currentTimeMillis()) {
+                        AlarmScheduler.scheduleAll(this@MainActivity, reminder.copy(id = id))
+                    }
+                    count++
+                }
+                statusFlow.value = "Se restauraron $count recordatorios del backup"
+            } catch (e: Exception) {
+                statusFlow.value = "Error al restaurar el backup: ${e.message}"
             }
         }
-        val intent = Intent(Intent.ACTION_SEND).apply {
-            type = "text/plain"
-            putExtra(Intent.EXTRA_SUBJECT, "Mis recordatorios")
-            putExtra(Intent.EXTRA_TEXT, summary)
-        }
-        startActivity(Intent.createChooser(intent, "Compartir recordatorios"))
     }
 
     private fun launchSpeechRecognizer(
@@ -435,14 +502,6 @@ class MainActivity : ComponentActivity() {
         }
         statusFlow.value = "Escuchando..."
         launcher.launch(intent)
-    }
-
-    private fun openOfflineVoiceSettings() {
-        try {
-            startActivity(Intent(Settings.ACTION_VOICE_INPUT_SETTINGS))
-        } catch (e: Exception) {
-            startActivity(Intent(Settings.ACTION_SETTINGS))
-        }
     }
 
     private fun canScheduleExactAlarms(): Boolean {
@@ -484,6 +543,35 @@ private fun Reminder.matchesSearch(query: String): Boolean {
 
 private val dateButtonFormatter = DateTimeFormatter.ofPattern("d MMM", Locale("es", "ES"))
 private val timeButtonFormatter = DateTimeFormatter.ofPattern("HH:mm", Locale("es", "ES"))
+
+@Composable
+private fun NamePromptDialog(onConfirm: (String) -> Unit) {
+    var name by remember { mutableStateOf("") }
+
+    AlertDialog(
+        onDismissRequest = { /* Obligatorio: no se puede cerrar sin poner un nombre. */ },
+        title = { Text("¡Bienvenido a MiAgenda!") },
+        text = {
+            Column {
+                Text("¿Cómo te llamas? Así la alarma te va a hablar por tu nombre, por ejemplo: \"Ismael, reunión con María\".")
+                Spacer(modifier = Modifier.height(12.dp))
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it },
+                    placeholder = { Text("Tu nombre") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = { if (name.isNotBlank()) onConfirm(name) },
+                enabled = name.isNotBlank()
+            ) { Text("Continuar") }
+        }
+    )
+}
 
 @Composable
 private fun ConflictDialog(
@@ -543,8 +631,8 @@ fun MainScreen(
     searchQuery: String,
     onSearchQueryChange: (String) -> Unit,
     onExport: () -> Unit,
+    onImport: () -> Unit,
     onClearHistory: () -> Unit,
-    onOpenOfflineVoiceSettings: () -> Unit,
     onSubmitText: () -> Unit,
     needsExactAlarmPermission: Boolean,
     needsBatteryExemption: Boolean,
@@ -600,12 +688,21 @@ fun MainScreen(
                             fontSize = 19.sp
                         )
                     }
-                    IconButton(onClick = onExport) {
-                        Icon(
-                            Icons.Filled.Share,
-                            contentDescription = "Exportar recordatorios",
-                            tint = Color.White
-                        )
+                    Row {
+                        IconButton(onClick = onImport) {
+                            Icon(
+                                Icons.Filled.Restore,
+                                contentDescription = "Restaurar backup",
+                                tint = Color.White
+                            )
+                        }
+                        IconButton(onClick = onExport) {
+                            Icon(
+                                Icons.Filled.Share,
+                                contentDescription = "Exportar backup",
+                                tint = Color.White
+                            )
+                        }
                     }
                 }
             }
@@ -691,8 +788,7 @@ fun MainScreen(
                 needsExactAlarmPermission = needsExactAlarmPermission,
                 needsBatteryExemption = needsBatteryExemption,
                 onFixBatteryExemption = onFixBatteryExemption,
-                onFixExactAlarmPermission = onFixExactAlarmPermission,
-                onOpenOfflineVoiceSettings = onOpenOfflineVoiceSettings
+                onFixExactAlarmPermission = onFixExactAlarmPermission
             )
             1 -> RemindersListTab(
                 modifier = Modifier.padding(padding),
@@ -745,8 +841,7 @@ private fun CreateTab(
     needsExactAlarmPermission: Boolean,
     needsBatteryExemption: Boolean,
     onFixBatteryExemption: () -> Unit,
-    onFixExactAlarmPermission: () -> Unit,
-    onOpenOfflineVoiceSettings: () -> Unit
+    onFixExactAlarmPermission: () -> Unit
 ) {
     Column(
         modifier = modifier
@@ -785,38 +880,6 @@ private fun CreateTab(
                     )
                     Spacer(modifier = Modifier.height(8.dp))
                     Button(onClick = onFixBatteryExemption) { Text("Ignorar optimización de batería") }
-                }
-            }
-            Spacer(modifier = Modifier.height(16.dp))
-        }
-
-        var showOfflineVoiceTip by remember { mutableStateOf(true) }
-        if (showOfflineVoiceTip) {
-            Card(
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
-                shape = MaterialTheme.shapes.medium
-            ) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text(
-                            "Para dictar sin internet, descarga el paquete de voz en español.",
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.weight(1f)
-                        )
-                        IconButton(
-                            onClick = { showOfflineVoiceTip = false },
-                            modifier = Modifier.size(20.dp)
-                        ) {
-                            Icon(Icons.Filled.Close, contentDescription = "Cerrar aviso")
-                        }
-                    }
-                    Spacer(modifier = Modifier.height(8.dp))
-                    OutlinedButton(onClick = onOpenOfflineVoiceSettings) {
-                        Text("Configurar voz sin conexión")
-                    }
                 }
             }
             Spacer(modifier = Modifier.height(16.dp))
