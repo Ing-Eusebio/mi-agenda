@@ -9,3 +9,7 @@
 .externalNativeBuild
 .cxx
 local.properties
+
+qr_base64.txt
+recordatorio_qr.png
+scratchpad/
