@@ -243,6 +243,10 @@ class MainActivity : ComponentActivity() {
                 ActivityResultContracts.OpenDocument()
             ) { uri -> uri?.let { importBackup(it) } }
 
+            val saveBackupLauncher = rememberLauncherForActivityResult(
+                ActivityResultContracts.CreateDocument("application/json")
+            ) { uri -> uri?.let { saveBackupToUri(it, allReminders) } }
+
             val speechLauncher = rememberLauncherForActivityResult(
                 ActivityResultContracts.StartActivityForResult()
             ) { result ->
@@ -317,7 +321,11 @@ class MainActivity : ComponentActivity() {
                     onManualRecurrenceChange = { manualRecurrence = it },
                     searchQuery = searchQuery,
                     onSearchQueryChange = { searchQuery = it },
-                    onExport = { exportBackup(allReminders) },
+                    onExport = { shareBackup(allReminders) },
+                    onSaveBackup = {
+                        val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
+                        saveBackupLauncher.launch("miagenda_backup_$timestamp.json")
+                    },
                     onImport = { importLauncher.launch(arrayOf("application/json", "*/*")) },
                     onClearHistory = { showClearHistoryConfirm = true },
                     onSubmitText = {
@@ -438,7 +446,7 @@ class MainActivity : ComponentActivity() {
      * Genera un archivo de respaldo (JSON) con todos los recordatorios y abre
      * el selector para compartirlo por correo, WhatsApp, Drive, etc.
      */
-    private fun exportBackup(reminders: List<Reminder>) {
+    private fun buildBackupJson(reminders: List<Reminder>): String {
         val json = JSONArray()
         reminders.forEach { reminder ->
             json.put(JSONObject().apply {
@@ -448,11 +456,15 @@ class MainActivity : ComponentActivity() {
                 put("note", reminder.note ?: JSONObject.NULL)
             })
         }
+        return json.toString(2)
+    }
 
+    /** Comparte el backup por WhatsApp, correo, Drive, etc. */
+    private fun shareBackup(reminders: List<Reminder>) {
         val backupsDir = File(cacheDir, "backups").apply { mkdirs() }
         val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
         val file = File(backupsDir, "miagenda_backup_$timestamp.json")
-        file.writeText(json.toString(2))
+        file.writeText(buildBackupJson(reminders))
 
         val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", file)
         val intent = Intent(Intent.ACTION_SEND).apply {
@@ -462,6 +474,18 @@ class MainActivity : ComponentActivity() {
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
         startActivity(Intent.createChooser(intent, "Compartir backup"))
+    }
+
+    /** Guarda el backup directo en el almacenamiento del teléfono, donde el usuario elija. */
+    private fun saveBackupToUri(uri: Uri, reminders: List<Reminder>) {
+        try {
+            contentResolver.openOutputStream(uri)?.use { output ->
+                output.write(buildBackupJson(reminders).toByteArray())
+            }
+            statusFlow.value = "Backup guardado correctamente"
+        } catch (e: Exception) {
+            statusFlow.value = "Error al guardar el backup: ${e.message}"
+        }
     }
 
     /**
@@ -649,6 +673,7 @@ fun MainScreen(
     searchQuery: String,
     onSearchQueryChange: (String) -> Unit,
     onExport: () -> Unit,
+    onSaveBackup: () -> Unit,
     onImport: () -> Unit,
     onClearHistory: () -> Unit,
     onSubmitText: () -> Unit,
@@ -836,6 +861,7 @@ fun MainScreen(
             else -> BackupTab(
                 modifier = Modifier.padding(padding),
                 onExport = onExport,
+                onSaveBackup = onSaveBackup,
                 onImport = onImport
             )
         }
@@ -1008,6 +1034,7 @@ private fun recurrenceExplanation(recurrence: String): String = when (recurrence
 private fun BackupTab(
     modifier: Modifier,
     onExport: () -> Unit,
+    onSaveBackup: () -> Unit,
     onImport: () -> Unit
 ) {
     Column(
@@ -1049,16 +1076,23 @@ private fun BackupTab(
                 }
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(
-                    "Crea un archivo con TODOS tus recordatorios y te deja enviarlo por WhatsApp, correo, Drive, o guardarlo donde quieras. Hazlo de vez en cuando, como quien guarda una foto importante.",
+                    "Crea un archivo con TODOS tus recordatorios. Puedes guardarlo directo en tu teléfono, o enviarlo por WhatsApp/correo/Drive para tenerlo también fuera del teléfono. Hazlo de vez en cuando, como quien guarda una foto importante.",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Spacer(modifier = Modifier.height(14.dp))
                 Button(
+                    onClick = onSaveBackup,
+                    modifier = Modifier.fillMaxWidth().height(52.dp)
+                ) {
+                    Text("Guardar backup en el teléfono")
+                }
+                Spacer(modifier = Modifier.height(10.dp))
+                OutlinedButton(
                     onClick = onExport,
                     modifier = Modifier.fillMaxWidth().height(52.dp)
                 ) {
-                    Text("Hacer backup ahora")
+                    Text("Enviar backup (WhatsApp, correo...)")
                 }
             }
         }
